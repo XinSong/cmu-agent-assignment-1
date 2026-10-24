@@ -23,22 +23,27 @@ buggy chess app -> CodeAgent -> fix.patch -> repaired chess server
 ## Setup
 
 Install [uv](https://docs.astral.sh/uv/), then run:
+
 ```bash
 make setup
 ```
+
 This will set up a Python environment (using `uv`), download and install relevant dependencies. This fails if either pinned `chess_app` source (for a task that your agent will work on) is missing or at the wrong commit.
 
 This assignment will make use of [Modal](https://modal.com/), a cloud platform for running code. This platform will allow you to run code that your agent generates safely on a cloud machine. The environments where your agents will be on a remote Modal sandbox, and run code that executes agent actions. First, set up a Modal account (if you do not have one), and follow instructions that you will be sent to access compute credit on Modal. Then, run 
+
 ```bash
 uv run modal setup
 ```
+
 to sign in and set up Modal in your environment.
 
-
 Once you have set up Modal, run 
+
 ```bash
 cp .env.example .env
 ```
+
 to create the file that contains your environment secrets – primarily LLM API details. You will receive instructions on how to access credits for an LLM provider if you are enrolled in the course. Follow the instructions to generate an API key, and ensure you configure the base URL for the service correctly.
 
 ```dotenv
@@ -47,25 +52,30 @@ OPENAI_API_KEY=...
 OPENAI_MODEL=deepseek/deepseek-v4-flash-0731
 OPENAI_MAX_RETRIES=5
 ```
+
 By default, you will use the DeepSeek-V4-Flash model, as you can see above. When indicated, you should use another model. Feel free to explore other models from the same provider if credits permit, but we intend the assignment to be solved with this model.
 
 We will refer to any activity that will use API credits (from Modal, or the LLM provider) as _billable_. You will run billable evaluations throughout the assignment. We recommend monitoring your use on relevant dashboards to ensure you make good use of the API credits.
 
 Before a billable run, validate submodules, Modal authentication, and the model endpoint without starting a sandbox or generating tokens:
+
 ```bash
 make doctor
 ```
 
 _(Optional)_ If you would like to test that all Modal components are running as intended, run
+
 ```bash
 make test-modal
 make test-chess-modal
 ```
 
 As a general tip, you can use
+
 ```bash
 modal container list
 ```
+
 to check that whether you have a billable Modal sandbox running. If the environment incorrectly shuts down, the sandbox may be left running and use up credits. You can use `modal container stop <container ID>` to stop a sandbox that was not correctly terminated.
 
 ## Public tests
@@ -100,6 +110,7 @@ The agent's LLM client retries temporary provider failures up to `OPENAI_MAX_RET
 > Add machinery to maintain agent state as it takes actions and observes the results. Construct a sequence of messages that form the language model prompt. This should include standing instructions, task specification, prior interaction including observations, reasoning, and actions from previous turns. Note that this method should be domain-agnostic and construct the prompt in a way that would apply to any of the inheriting domain-specific agents.
 
 Next, you should construct the system and task prompts for `CodeAgent`. The system message _must_ contain this block verbatim, using values exposed by the environment:
+
 ```text
 <system_information>
 {
@@ -111,7 +122,7 @@ Next, you should construct the system and task prompts for `CodeAgent`. The syst
 </system_information>
 ```
 
-> **TODO(1.1.b)**
+> - **TODO(1.1.b)**
 > Construct the system prompt and task_prompt for `CodeAgent`. These should be usable by the `Agent.build_prompt` method.
 
 ### 2. Run the ReAct loop
@@ -129,6 +140,7 @@ Implement `CodeAgent.execute_tool_calls`. The coding agent supports two tools: `
 > Make the `execute` and `send_message` tools available to the agent. Parse each call, execute recognized tools, and return one message per call (there may be multiple tool calls in one agent response!). Malformed JSON and unknown tools must become recoverable observations relayed to the agent instead of exceptions.
 
 ### 4. Load skills
+
 You might think we're all set to run the agent on a software issue, but not yet! One final piece of knowledge `CodeAgent` needs is instructions on how to submit the solution. The specific protocol we are using is that once the agent has solved the issue, it saves its solution in a file called `patch.txt`. This file is extracted from the environment for evaluation.
 
 To teach the agent this protocol, we will use a skill. Skills are ways to extend agent capabilities with specialized, reusable workflows. The [Agent Skills protocol](https://agentskills.io/home) defines a standard for skills to follow so they can be supported by multiple agent frameworks. `tasks/code-skills/submit-task` defines a rudimentary skill for submitting the solution following this protocol. While the protocol has more advanced features you can explore, you will work with a minimal skill for this assignment.
@@ -138,9 +150,10 @@ The core feature you need to implement is _progressive disclosure_. To allow age
 The skill files are available [locally](./tasks/code-skills/), and `Agent.skills_path` points to this location when the agent is run, if it is using skills (it is set to `None` otherwise). Note that in this assignment, the agent will only be using one skill (one subfolder in `./tasks/code-skills/`) but in principle an agent could have many skills that it uses, making progressive disclosure more important and useful.
 
 > **TODO(1.4)**
-> Validate ``skills_path``, discover one ``SKILL.md`` per child directory, parse its YAML frontmatter (what's between the `---` tags at the head of the file), and return a mapping keyed by the frontmatter ``name``. Each value must contain a concise ``metadata`` string for the model's skill catalog and the complete ``content`` of the skill file for ``invoke_skill``. Reject duplicate names and malformed or missing frontmatter with a clear ``ValueError``. If any skills are available to the agent, make their descriptions/metadata available to the agent in the prompt.
+> Validate `skills_path`, discover one `SKILL.md` per child directory, parse its YAML frontmatter (what's between the `---` tags at the head of the file), and return a mapping keyed by the frontmatter `name`. Each value must contain a concise `metadata` string for the model's skill catalog and the complete `content` of the skill file for `invoke_skill`. Reject duplicate names and malformed or missing frontmatter with a clear `ValueError`. If any skills are available to the agent, make their descriptions/metadata available to the agent in the prompt.
 
 For example, the `SKILL.md` has `content`
+
 ```
 ---
 name: hello-world
@@ -149,7 +162,9 @@ description: Write "hello, world" to the terminal
 
 echo "hello, world"
 ```
+
 and `metadata`
+
 ```
 name: hello-world
 description: Write "hello, world" to the terminal
@@ -218,10 +233,9 @@ Your agent has fixed the issue with the chess app in Part 1, so now you can buil
 You will first define a new tool that allows the agent to play the game that is running in the app. Follow the [OpenAI function calling guidelines](https://developers.openai.com/api/docs/guides/function-calling) to define tools.
 
 > **TODO(3.1.a)**
-> Define an OpenAI function-tool schema named ``play_move``. It must accept exactly one required string argument named ``move``, explain that moves use [UCI notation](https://en.wikipedia.org/wiki/Universal_Chess_Interface) (for example `e2e4` and `e7e8q`), and reject extra arguments.
+> Define an OpenAI function-tool schema named `play_move`. It must accept exactly one required string argument named `move`, explain that moves use [UCI notation](https://en.wikipedia.org/wiki/Universal_Chess_Interface) (for example `e2e4` and `e7e8q`), and reject extra arguments.
 
 Then, you will implement the mechanism that runs the tool.[^3]
-
 
 > **TODO(3.1.b)**
 > Implement `_play_move` in `chess_tools.py`. Parse the arguments and POST `{"move": <uci move>}` to `/api/move`. Return its serialized JSON object. Catch any errors raised by the tool and return an error message between `<chess_error></chess_error>` for the agent to address. Cover malformed JSON arguments, arguments that are not an object, a missing or non-string fen, a non-string move, a position or move the server rejects, and a transport failure.
@@ -285,8 +299,7 @@ With the ability to simulate moves on the board, the agent can now engage in mor
 
 > **TODO(3.4)**
 > Parse the arguments and run the code in the sandbox with the registered tools available by name. `/opt/assignment/sandbox_python.py` is a script on the `env` sandbox that has access to the same tool definitions in this file. Use it to run the code that the model produced as an argument to the run_python tool. The script accepts two positional arguments -- `port` and a base64-encoded string of code (to prevent issues with quoting). Implement this tool call.
-> The script prints one JSON object with `stdout`, `stderr`, and `error` from running the code -- return that string as it is. A non-zero returncode means the sandbox itself failed, not the model's code. Report `exception_info` or `stderr` as a <chess_error>. 
-> Return <chess_error>{message}</chess_error> if there are issues like type mismatches or parsing failures.
+> The script prints one JSON object with `stdout`, `stderr`, and `error` from running the code -- return that string as it is. A non-zero returncode means the sandbox itself failed, not the model's code. Report `exception_info` or `stderr` as a . Return {message} if there are issues like type mismatches or parsing failures.
 
 Model-written code must not run in the local agent process. `_run_python` sends base64-encoded code through `env.execute` to the provided sandbox runner:
 
@@ -310,7 +323,7 @@ While the ability to run Python code gives the agent the option to execute compl
 when skills were loaded, and return the named full content.
 
 > **TODO(3.5)**
-> Parse the arguments and return the named skill's content. Return <chess_error>{message}</chess_error> if there are issues like type mismatches or parsing failures.
+> Parse the arguments and return the named skill's content. Return {message} if there are issues like type mismatches or parsing failures.
 
 ```bash
 uv run assignment-play-chess \

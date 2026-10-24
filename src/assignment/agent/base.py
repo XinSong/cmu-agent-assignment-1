@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -41,11 +42,11 @@ def format_tool_output(output: dict[str, Any]) -> str:
     """Format a terminal result as a compact, tagged model observation."""
 
     elements: list[str] = []
-    for key in sorted(output):
-        value = output[key]
+    for key, value in sorted(output.items()):
         if isinstance(value, str) and len(value) > MAX_OBSERVATION_CHARS:
             # Leave room for the elision notice so the formatted value itself,
             # not just its retained source slices, stays below the limit.
+            # 保留前4900个字符和后4900个字符, 中间用省略号表示
             retained_at_each_end = 4_900
             omitted = len(value) - (2 * retained_at_each_end)
             value = (
@@ -60,6 +61,7 @@ def format_tool_output(output: dict[str, Any]) -> str:
 def rough_message_tokens(messages: list[dict[str, Any]]) -> int:
     """Estimate prompt tokens without a provider-specific tokenizer."""
 
+    # 估算整段 messages 的总 token 数：序列化后按约 4 个字符 = 1 token快速计算
     serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
     return max(1, math.ceil(len(serialized) / 4))
 
@@ -132,6 +134,8 @@ class Agent:
 
         # Each agent supplies its own opening messages: the standing
         # instructions, and the task statement that starts the run.
+        # 此处system_prompt与task_prompt使用空字符串占位,
+        # 各子类必须自己填充system_prompt 和 task_prompt
         self.system_prompt: str = ""
         self.task_prompt: str = ""
 
@@ -153,6 +157,12 @@ class Agent:
         # TODO(1.1.a): Add machinery to maintain agent state as it takes actions
         # and observes the results.
 
+        # 注意:
+        # 此处self.messages 只保存assistant actions 与 tool observations, 
+        # 不包含system_prompt / task_prompt, 
+        # system_prompt / task_prompt 由子类单独设置，在 build_prompt 时再拼到前面.
+        self.messages: list[dict[str, Any]] = []
+
     def load_skills(self, skills_path: Path) -> dict[str, dict[str, str]]:
         """Load the skill folders exposed to this agent."""
 
@@ -164,7 +174,59 @@ class Agent:
         # ``content`` of the skill file for ``invoke_skill``. Reject duplicate
         # names and malformed or missing frontmatter with a clear
         # ``ValueError``.
-        raise NotImplementedError
+        if not skills_path.exists() or not skills_path.is_dir():
+            raise ValueError(f"skills_path does not exist or is not a directory: {skills_path}")
+
+        skills: dict[str, dict[str, str]] = {}
+        for child_dir in sorted(skills_path.iterdir()):
+            if not child_dir.is_dir():
+                continue
+            skill_file = child_dir / "SKILL.md"
+            if not skill_file.is_file():
+                raise ValueError(
+                    f"skill directory {child_dir.name} is missing SKILL.md"
+                )
+
+            content = skill_file.read_text(encoding="utf-8")
+            if not content.startswith("---"):
+                raise ValueError(
+                    f"SKILL.md in {child_dir.name} is missing YAML frontmatter"
+                )
+            parts = content.split("---", 2)
+            # Expect: "" | frontmatter | body... after split on first two fences.
+            if len(parts) < 3:
+                raise ValueError(
+                    f"SKILL.md in {child_dir.name} has malformed YAML frontmatter"
+                )
+            try:
+                frontmatter = yaml.safe_load(parts[1])
+            except yaml.YAMLError as exc:
+                raise ValueError(
+                    f"SKILL.md in {child_dir.name} has invalid YAML frontmatter: {exc}"
+                ) from exc
+            if not isinstance(frontmatter, dict):
+                raise ValueError(
+                    f"SKILL.md in {child_dir.name} frontmatter must be a mapping"
+                )
+            name = frontmatter.get("name")
+            description = frontmatter.get("description")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(
+                    f"SKILL.md in {child_dir.name} is missing a valid frontmatter name"
+                )
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError(
+                    f"SKILL.md in {child_dir.name} is missing a valid frontmatter "
+                    "description"
+                )
+            if name in skills:
+                raise ValueError(f"duplicate skill name {name!r}")
+
+            skills[name] = {
+                "metadata": f"name: {name}\ndescription: {description}",
+                "content": content,
+            }
+        return skills
 
     def query_language_model(self) -> dict[str, Any]:
         """Send one tool-enabled Chat Completions request and normalize it."""
@@ -227,16 +289,27 @@ class Agent:
 
         # You want to be careful about which attributes of the class you modify
         # here as they may also be handled by the subclasses.
-        raise NotImplementedError
+        # 拼出发给模型的完整 messages：
+        # - system：子类提供的站立指令（system_prompt）
+        # - user：整场任务说明（task_prompt），一般不变
+        # - *self.messages：此前各轮的 assistant 动作与 tool 观察（由 run 循环追加）
+        return [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.task_prompt},
+            *self.messages,
+        ]
 
     def estimate_active_prompt_tokens(self) -> int:
         """Estimate the next prompt, calibrated by the provider's latest usage."""
 
         current_prompt = self.build_prompt()
         rough_current = rough_message_tokens(current_prompt)
+
+        # 如果还没有任何API调用记录, 则返回current_prompt的token数, 即rough_current
         if not self.api_prompts or not self.api_responses:
             return rough_current
 
+        # 如果已经有API调用记录, 则返回当前rough_current与上次API调用后的token数之和
         usage = self.api_responses[-1].get("usage") or {}
         actual_previous = usage.get("prompt_tokens")
         if not isinstance(actual_previous, int):
@@ -330,13 +403,28 @@ class Agent:
             # step. Ensure you identify when the agent has completed the task
             # by setting `Agent.finished`. If the agent exceeds the
             # `step_limit`, raise `StepLimitError`.
+            while not self.finished:
+                if self.steps_taken >= self.step_limit:
+                    raise StepLimitError(
+                        f"Agent exceeded step_limit={self.step_limit}."
+                    )
 
-            # TODO(2.2) Call `maybe_compact_context()` before each new action
-            # request in your shared loop. It already estimates active tokens
-            # and handles the threshold, and tracks compaction events for
-            # logging.
+                # TODO(2.2) Call `maybe_compact_context()` before each new action
+                # request in your shared loop. It already estimates active tokens
+                # and handles the threshold, and tracks compaction events for
+                # logging.
+                # 仅返回是否发生了压缩（True/False）；压缩结果写进内部状态，
+                self.maybe_compact_context()
 
-            raise NotImplementedError
+                assistant_message = self.query_language_model()
+                self.messages.append(assistant_message)
+
+                tool_calls = assistant_message.get("tool_calls") or []
+                if tool_calls:
+                    # Subclasses set `finished` inside execute_tool_calls when
+                    # the domain signals completion (e.g. send_message / game_over).
+                    observations = self.execute_tool_calls(tool_calls)
+                    self.messages.extend(observations)
         finally:
             # This block is provided infrastructure. Do not modify it: a
             # trajectory is required even when a run fails.
