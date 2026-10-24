@@ -31,7 +31,30 @@ MAX_OBSERVATION_CHARS = 10_000
 # TODO(Part 2): Write instructions that make the model produce concise working
 # memory for a software agent. The prompt should preserve concrete progress,
 # failures, test results, constraints, and next steps without copying raw output.
-COMPACTION_SYSTEM_PROMPT = ""
+COMPACTION_SYSTEM_PROMPT = """\
+你是一位 Agent 上下文压缩专家。你的任务是将 Agent 的历史交互记录压缩为简洁、准确、可执行的工作记忆，使 Agent 能够基于压缩后的上下文无缝继续任务。
+
+**必须保留的信息：**
+- **目标与约束**：用户的任务目标、具体要求、偏好及明确限制。
+- **当前状态**：已完成的工作、已确定的决策，以及任务的最新进展。
+- **操作与结果**：已查看或修改的文件、执行过的命令与工具调用、关键输出及已验证的结论。
+- **失败与阻塞**：失败的尝试、已知问题、未解决的疑问，以及避免重复犯错的重要经验。
+- **后续行动**：尚未完成的任务，以及下一步最直接、可执行的操作。
+
+**压缩规则：**
+- 优先保留对后续任务执行有价值的信息，而非追求历史记录的完整性。
+- 对后续执行至关重要的文件路径、标识符、命令、参数及错误信息，必须准确保留。
+- 明确区分已验证的事实、推测、假设及尚未验证的结果。
+- 当历史信息发生变化或冲突时，以最新的有效状态为准，删除已失效的信息。
+- 删除重复讨论、中间推理、原始工具日志，以及冗长的代码和文件内容。
+- 使用简洁、客观的要点，按主题组织信息。
+- 不得编造信息，不得将未经验证的操作描述为已成功完成。
+- 仅压缩已有历史，不执行实际任务，也不提出超出历史依据的新计划。
+
+**输出要求：**
+
+仅输出压缩后的工作记忆，不添加前言、解释或其他无关内容。
+"""
 
 
 class StepLimitError(Exception):
@@ -325,6 +348,26 @@ class Agent:
 
         return self.compact_threshold_tokens is not None
 
+    def _split_messages_for_compaction(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Split history into an old prefix to summarize and recent turns to keep."""
+
+        # self.messages 是按「轮」组织的，而不是按条数：
+        #   assistant(+tool_calls) → 若干 tool 观察 → assistant → tool* → ...
+        # 压缩也按轮切：保留最近 keep 个完整 assistant 回合（含其后续 tool），
+        # 更早的轮次整段拿去摘要。因此用 assistant 下标当锚点，
+        # 避免按「最后 N 条消息」切开把某次 tool 和它的 assistant 拆散。
+        assistant_indices = [
+            index
+            for index, message in enumerate(self.messages)
+            if message.get("role") == "assistant"
+        ]
+        keep = self.compaction_keep_recent_steps
+        # 最近 keep 轮的起点 = 倒数第 keep 个 assistant 的位置。
+        first_recent = assistant_indices[-keep]
+        return self.messages[:first_recent], self.messages[first_recent:]
+
     def compact_context(self):
         """Replace parts of prompt with model-generated working memory. Changes the
         content that `build_prompt` emits."""
@@ -338,9 +381,21 @@ class Agent:
         # with all linked tool observations. The resulting summary should change
         # what `build_prompt` emits, and reduce the length of the prompt.
 
-        raise NotImplementedError
+        old_messages, recent_messages = self._split_messages_for_compaction()
+        compaction_task_message = {
+            "role": "user",
+            "content": (
+                "请将上述历史交互压缩为简洁、准确的工作记忆，保留继续完成当前任务所必需的关键信息，"
+                "确保 Agent 能够基于压缩后的上下文无缝恢复执行。"
+            ),
+        }
 
-        compaction_prompt = []
+        compaction_prompt = [
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": self.task_prompt},
+            *old_messages,
+            compaction_task_message,
+        ]
 
         ### Do not modify this section ###
         compaction_response = self.client.chat.completions.create(
@@ -353,6 +408,16 @@ class Agent:
 
         # Use `compaction_response` to update what `build_prompt` emits, but
         # DO NOT modify the object itself. Let the method return it unchanged.
+        summary = compaction_response.choices[0].message.content or ""
+        # system_prompt / task_prompt stay as-is in build_prompt; only replace
+        # the old transcript prefix with working memory, then keep recent turns.
+        self.messages = [
+            {
+                "role": "user",
+                "content": f"<working_memory>\n{summary}\n</working_memory>",
+            },
+            *recent_messages,
+        ]
 
         ### Do not modify this section ###
         return compaction_prompt, compaction_response.model_dump(mode="json")
